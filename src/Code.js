@@ -9,6 +9,13 @@
  *   in the folders listed in the WARM_FOLDER_IDS script property and
  *   pre-resolves every standalone link, keeping the cache warm so
  *   callers such as blog-gas almost always hit the cache.
+ * - URLs that appear in the user's own List of stuff data (the
+ *   LIST_DATA_URL script property, list-of-stuff-gas) are answered
+ *   from that data before any page is fetched: the sheet already
+ *   carries the title and image, and the card description is built
+ *   from the price, unit count and the user's own comment. That data
+ *   is the user's own record (already public on /list-of-stuff), and
+ *   images are still only referenced by URL, never copied.
  * - Page bodies are decoded with the charset the page itself declares
  *   (HTTP header first, then the meta tag). Rakuten Ichiba pages are
  *   Shift_JIS while their headers do not say so, and the default
@@ -22,6 +29,8 @@ export const OG_FETCH_BATCH_SIZE = 20;
 export const OG_API_BUDGET_MS = 40000;
 export const OG_WARM_BUDGET_MS = 300000; // stay under the 6-minute trigger cap
 export const OG_POST_MAX_URLS = 100;
+export const LIST_DATA_CACHE_KEY = 'list-data:map';
+export const LIST_DATA_CACHE_TTL = 3600; // list data changes rarely; 1 hour is plenty
 
 export const log_ = (msg) => {
   console.log(msg);
@@ -133,6 +142,51 @@ export const decodeBody_ = (blob, headerCharset) => {
   }
 };
 
+/** -----------------------------
+ *  List of stuff data source: the user's own possessions list,
+ *  served as JSON by list-of-stuff-gas (LIST_DATA_URL property).
+ *  ----------------------------- */
+export const listDataDescription_ = (item) => {
+  const parts = [];
+  const price = Number(item && item.price);
+  if (price > 0) {
+    let head = `¥${price.toLocaleString('ja-JP')}`;
+    const unit = Number(item && item.unit);
+    if (unit > 1) head += ` ×${unit}`;
+    parts.push(head);
+  }
+  const comment = String((item && item.comment) || '').trim();
+  if (comment) parts.push(comment);
+  return parts.join(' ').slice(0, OG_DESCRIPTION_LIMIT);
+};
+
+export const fetchListDataMap_ = () => {
+  const base = PropertiesService.getScriptProperties().getProperty('LIST_DATA_URL');
+  if (!base) return null;
+  const cache = CacheService.getScriptCache();
+  try {
+    const raw = cache.get(LIST_DATA_CACHE_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch (e) { /* fall through and fetch */ }
+  const res = UrlFetchApp.fetch(base, { muteHttpExceptions: true });
+  const code = res.getResponseCode();
+  if (code < 200 || code >= 300) throw new Error(`List data returned ${code}`);
+  const items = JSON.parse(res.getContentText());
+  const map = {};
+  (Array.isArray(items) ? items : []).forEach((item) => {
+    if (!item || !item.url || !item.title) return;
+    map[String(item.url)] = {
+      title: String(item.title || ''),
+      image: String(item.image || ''),
+      description: listDataDescription_(item),
+    };
+  });
+  try {
+    cache.put(LIST_DATA_CACHE_KEY, JSON.stringify(map), LIST_DATA_CACHE_TTL);
+  } catch (e) { /* map can exceed the cache value limit; use it uncached */ }
+  return map;
+};
+
 export const resolveOgData_ = (urls, budgetMs = OG_API_BUDGET_MS) => {
   const result = {};
   try {
@@ -171,8 +225,30 @@ export const resolveOgData_ = (urls, budgetMs = OG_API_BUDGET_MS) => {
         try { cache.put(ogCacheKey_(url), JSON.stringify({}), OG_FAILURE_CACHE_TTL); } catch (e) { /* ignore */ }
       }
     };
-    for (let b = 0; b < misses.length; b += OG_FETCH_BATCH_SIZE) {
-      const batch = misses.slice(b, b + OG_FETCH_BATCH_SIZE);
+    // The user's own List of stuff data answers first: exact URL
+    // matches resolve instantly, with no page fetch at all. Anything
+    // not in the list falls through to the batched page fetch below.
+    let fetchMisses = misses;
+    try {
+      const listMap = fetchListDataMap_();
+      if (listMap) {
+        fetchMisses = [];
+        misses.forEach((url) => {
+          const d = listMap[url];
+          if (d && (d.title || d.image)) {
+            storeResult_(url, d);
+          } else {
+            fetchMisses.push(url);
+          }
+        });
+        if (!fetchMisses.length) return result;
+      }
+    } catch (e) {
+      log_(`List data lookup failed: ${e.message}`);
+      fetchMisses = misses;
+    }
+    for (let b = 0; b < fetchMisses.length; b += OG_FETCH_BATCH_SIZE) {
+      const batch = fetchMisses.slice(b, b + OG_FETCH_BATCH_SIZE);
       if (Date.now() > deadline) {
         log_(`OG resolve budget exceeded: skipping ${batch.length} URL(s)`);
         batch.forEach((url) => storeResult_(url, null));

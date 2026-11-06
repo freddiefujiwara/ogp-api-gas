@@ -239,6 +239,63 @@ describe('ogp-api-gas Code.js', () => {
     });
   });
 
+  describe('list data source', () => {
+    const LIST_URL = 'https://script.google.com/macros/s/LIST/exec';
+    const sheetItem = {
+      title: 'シートの商品', image: 'https://example.com/sheet.jpg', url: URL_A,
+      price: 1500, unit: 2, genre: '服', comment: 'ブラック',
+    };
+
+    beforeEach(() => {
+      mockUrlFetchApp.fetchAll.mockReset();
+      mockUrlFetchApp.fetch.mockReset();
+      mockCache.get.mockReturnValue(null);
+      mockProperties.getProperty.mockImplementation((k) => (k === 'LIST_DATA_URL' ? LIST_URL : null));
+    });
+
+    it('builds card descriptions from price, unit and comment', () => {
+      expect(Code.listDataDescription_(sheetItem)).toBe('¥1,500 ×2 ブラック');
+      expect(Code.listDataDescription_({ ...sheetItem, unit: 1 })).toBe('¥1,500 ブラック');
+      expect(Code.listDataDescription_({ ...sheetItem, price: 0, comment: '' })).toBe('');
+    });
+
+    it('answers a miss from the list data without fetching any page', () => {
+      mockUrlFetchApp.fetch.mockImplementation((url) => {
+        if (url === LIST_URL) return responseOf({ text: JSON.stringify([sheetItem]) });
+        throw new Error(`unexpected fetch: ${url}`);
+      });
+      const result = Code.resolveOgData_([URL_A]);
+      expect(result[URL_A]).toEqual({
+        title: 'シートの商品', image: 'https://example.com/sheet.jpg', description: '¥1,500 ×2 ブラック',
+      });
+      expect(mockUrlFetchApp.fetchAll).not.toHaveBeenCalled();
+      expect(mockCache.put).toHaveBeenCalledWith(
+        Code.ogCacheKey_(URL_A), expect.stringContaining('シートの商品'), Code.OG_CACHE_TTL,
+      );
+    });
+
+    it('falls through to page fetching for URLs not in the list', () => {
+      mockUrlFetchApp.fetch.mockReturnValue(responseOf({ text: JSON.stringify([sheetItem]) }));
+      mockUrlFetchApp.fetchAll.mockReturnValue([responseOf({ blob: blobOf({ 'UTF-8': ogHtml() }) })]);
+      const result = Code.resolveOgData_(['https://example.com/not-in-list']);
+      expect(result['https://example.com/not-in-list'].title).toBe('Example Title');
+      expect(mockUrlFetchApp.fetchAll).toHaveBeenCalledTimes(1);
+    });
+
+    it('fetchListDataMap_ returns null when the property is not set', () => {
+      mockProperties.getProperty.mockReturnValue(null);
+      expect(Code.fetchListDataMap_()).toBeNull();
+      expect(mockUrlFetchApp.fetch).not.toHaveBeenCalled();
+    });
+
+    it('falls back to page fetching when the list data cannot be loaded', () => {
+      mockUrlFetchApp.fetch.mockReturnValue(responseOf({ code: 500, text: 'err' }));
+      mockUrlFetchApp.fetchAll.mockReturnValue([responseOf({ blob: blobOf({ 'UTF-8': ogHtml() }) })]);
+      const result = Code.resolveOgData_([URL_A]);
+      expect(result[URL_A].title).toBe('Example Title');
+    });
+  });
+
   describe('doGet', () => {
     it('rejects a missing url parameter', () => {
       const out = Code.doGet({ parameter: {} });
