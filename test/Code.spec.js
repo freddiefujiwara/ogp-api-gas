@@ -274,6 +274,15 @@ describe('ogp-api-gas Code.js', () => {
       );
     });
 
+    it('uses the fallback image for list items whose image is empty', () => {
+      mockUrlFetchApp.fetch.mockImplementation((url) => {
+        if (url === LIST_URL) return responseOf({ text: JSON.stringify([{ ...sheetItem, image: '' }]) });
+        throw new Error(`unexpected fetch: ${url}`);
+      });
+      const result = Code.resolveOgData_([URL_A]);
+      expect(result[URL_A].image).toBe(Code.LIST_FALLBACK_IMAGE);
+    });
+
     it('answers a percent-encoded URL from list data keyed by the raw URL', () => {
       const rawUrl = 'https://www.google.com/search?q=ワークマン 手袋';
       const encodedUrl = 'https://www.google.com/search?q=%E3%83%AF%E3%83%BC%E3%82%AF%E3%83%9E%E3%83%B3%20%E6%89%8B%E8%A2%8B';

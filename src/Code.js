@@ -31,6 +31,9 @@ export const OG_WARM_BUDGET_MS = 300000; // stay under the 6-minute trigger cap
 export const OG_POST_MAX_URLS = 100;
 export const LIST_DATA_CACHE_KEY = 'list-data:map';
 export const LIST_DATA_CACHE_TTL = 3600; // list data changes rarely; 1 hour is plenty
+// Same placeholder the List of stuff front-end uses for items whose
+// image is missing, so list cards never render imageless.
+export const LIST_FALLBACK_IMAGE = 'https://tshop.r10s.jp/rukusu/cabinet/images/junbi.jpg';
 
 export const log_ = (msg) => {
   console.log(msg);
@@ -174,7 +177,7 @@ export const fetchListDataMap_ = () => {
     if (!item || !item.url || !item.title) return;
     map[String(item.url)] = {
       title: String(item.title || ''),
-      image: String(item.image || ''),
+      image: String(item.image || '') || LIST_FALLBACK_IMAGE,
       description: listDataDescription_(item),
     };
   });
