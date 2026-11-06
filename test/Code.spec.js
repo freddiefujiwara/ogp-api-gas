@@ -61,6 +61,7 @@ const mockScriptApp = {
   getProjectTriggers: vi.fn().mockReturnValue([]),
   deleteTrigger: vi.fn(),
   newTrigger: vi.fn(),
+  getOAuthToken: vi.fn().mockReturnValue('test-token'),
 };
 
 global.CacheService = mockCacheService;
@@ -84,10 +85,11 @@ const blobOf = (byCharset) => ({
   getDataAsString: vi.fn((cs) => byCharset[cs] ?? byCharset['UTF-8'] ?? ''),
 });
 
-const responseOf = ({ code = 200, headers = {}, blob }) => ({
+const responseOf = ({ code = 200, headers = {}, blob, text = '' }) => ({
   getResponseCode: () => code,
   getHeaders: () => headers,
   getBlob: () => blob,
+  getContentText: () => text,
 });
 
 const URL_A = 'https://example.com/page-a';
@@ -310,40 +312,52 @@ describe('ogp-api-gas Code.js', () => {
   });
 
   describe('warming', () => {
-    const linkPara = (url) => ({
-      getType: () => 'PARAGRAPH',
-      asParagraph: () => ({
-        getNumChildren: () => 1,
-        getChild: () => ({
-          getType: () => 'TEXT',
-          asText: () => ({
-            getText: () => url,
-            getTextAttributeIndices: () => [0],
-            getAttributes: () => ({ LINK_URL: url }),
-          }),
-        }),
-      }),
+    it('collectDocUrlsFromHtml_ detects a linked URL paragraph', () => {
+      const html = `<p class="c1"><span><a href="${URL_A}">${URL_A}</a></span></p>`;
+      expect(Code.collectDocUrlsFromHtml_(html)).toEqual([URL_A]);
     });
 
-    it('standaloneLinkUrl_ detects a bare link paragraph', () => {
-      const p = linkPara(URL_A).asParagraph();
-      expect(Code.standaloneLinkUrl_(p)).toBe(URL_A);
+    it('collectDocUrlsFromHtml_ detects a bare URL paragraph and dedupes', () => {
+      const html = `<p>${URL_A}</p><p><a href="${URL_A}">${URL_A}</a></p><p>just text</p>`;
+      expect(Code.collectDocUrlsFromHtml_(html)).toEqual([URL_A]);
     });
 
-    it('collectWarmUrls_ scans the configured folders and dedupes', () => {
+    it('collectDocUrlsFromHtml_ ignores anchor text that is not the URL itself', () => {
+      expect(Code.collectDocUrlsFromHtml_(`<p><a href="${URL_A}">click here</a></p>`)).toEqual([]);
+      expect(Code.collectDocUrlsFromHtml_(`<p>see <a href="${URL_A}">${URL_A}</a></p>`)).toEqual([]);
+    });
+
+    it('collectDocUrlsFromHtml_ unwraps Google redirect hrefs', () => {
+      const wrapped = `https://www.google.com/url?q=${encodeURIComponent(URL_A)}&amp;sa=D`;
+      expect(Code.collectDocUrlsFromHtml_(`<p><a href="${wrapped}">${URL_A}</a></p>`)).toEqual([URL_A]);
+    });
+
+    it('collectWarmUrls_ exports docs through Drive and dedupes', () => {
       mockProperties.getProperty.mockImplementation((k) => (k === 'WARM_FOLDER_IDS' ? 'folder-1' : null));
-      const files = [{ getId: () => 'doc-1' }];
+      const html = `<p><a href="${URL_A}">${URL_A}</a></p><p>${URL_A}</p><p>text</p>`;
+      const files = [{
+        getId: () => 'doc-1',
+        getAs: vi.fn(() => ({ getDataAsString: () => html })),
+      }];
       let i = 0;
       mockDriveApp.getFolderById.mockReturnValue({
         getFilesByType: () => ({ hasNext: () => i < files.length, next: () => files[i++] }),
       });
-      mockDocumentApp.openById.mockReturnValue({
-        getBody: () => ({
-          getNumChildren: () => 2,
-          getChild: () => linkPara(URL_A),
-        }),
-      });
       expect(Code.collectWarmUrls_()).toEqual([URL_A]);
+      expect(files[0].getAs).toHaveBeenCalledWith('text/html');
+    });
+
+    it('collectWarmUrls_ skips a doc whose export fails', () => {
+      mockProperties.getProperty.mockImplementation((k) => (k === 'WARM_FOLDER_IDS' ? 'folder-1' : null));
+      const files = [{
+        getId: () => 'doc-1',
+        getAs: vi.fn(() => { throw new Error('export failed'); }),
+      }];
+      let i = 0;
+      mockDriveApp.getFolderById.mockReturnValue({
+        getFilesByType: () => ({ hasNext: () => i < files.length, next: () => files[i++] }),
+      });
+      expect(Code.collectWarmUrls_()).toEqual([]);
     });
 
     it('setupWarmTrigger replaces existing warm triggers with one 6-hour trigger', () => {

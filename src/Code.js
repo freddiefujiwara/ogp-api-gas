@@ -231,42 +231,52 @@ export const resolveOgData_ = (urls, budgetMs = OG_API_BUDGET_MS) => {
  *  Cache warming: scan the configured folders' Docs for standalone
  *  links and resolve them all, every 6 hours (the cache TTL).
  *  ----------------------------- */
-export const standaloneLinkUrl_ = (p) => {
-  let text = '';
-  let linkUrl = null;
-  let hasUnlinkedText = false;
-  for (let i = 0; i < p.getNumChildren(); i++) {
-    const child = p.getChild(i);
-    if (child.getType() !== DocumentApp.ElementType.TEXT) return null;
-    const textEl = child.asText();
-    const fullText = textEl.getText() || '';
-    if (!fullText) continue;
-    text += fullText;
-    const indices = textEl.getTextAttributeIndices() || [];
-    if (indices.length === 0 || indices[0] !== 0) indices.unshift(0);
-    if (indices[indices.length - 1] !== fullText.length) indices.push(fullText.length);
-    for (let k = 0; k < indices.length - 1; k++) {
-      const start = indices[k];
-      const end = indices[k + 1];
-      if (start >= end) continue;
-      const chunk = fullText.substring(start, end);
-      if (!chunk.trim()) continue;
-      const link = (textEl.getAttributes(start) || {})[DocumentApp.Attribute.LINK_URL];
-      if (!link) {
-        hasUnlinkedText = true;
-      } else if (linkUrl && linkUrl !== link) {
-        return null;
-      } else {
-        linkUrl = link;
-      }
-    }
+/**
+ * The warmer reads Docs through Drive's built-in export
+ * (File.getAs('text/html')), which works under drive.readonly.
+ * The two obvious alternatives do not work for this project
+ * (verified 2026-11-07 on staging): DocumentApp.openById demands
+ * the full documents scope, and the Docs API REST endpoints return
+ * 403 because the API is not enabled in the project's Cloud
+ * project. Exported HTML keeps link targets, so a paragraph whose
+ * whole text is one link (or a bare URL) is still detectable.
+ */
+export const unwrapExportedHref_ = (href) => {
+  const raw = decodeHtmlEntities_(String(href || ''));
+  const m = raw.match(/^https?:\/\/www\.google\.com\/url\?q=([^&]+)/);
+  if (m) {
+    try { return decodeURIComponent(m[1]); } catch (e) { return raw; }
   }
-  const trimmed = text.trim();
-  if (!trimmed) return null;
-  if (!hasUnlinkedText && linkUrl && trimmed === linkUrl && /^https?:\/\//.test(linkUrl)) return linkUrl;
-  if (!linkUrl && /^https?:\/\/\S+$/.test(trimmed)) return trimmed;
-  return null;
+  return raw;
 };
+
+export const collectDocUrlsFromHtml_ = (html) => {
+  const urls = [];
+  const push = (u) => {
+    if (u && /^https?:\/\//.test(u) && !urls.includes(u)) urls.push(u);
+  };
+  String(html || '').split(/<\/p>/i).forEach((chunk) => {
+    const anchors = [];
+    const anchorRe = /<a\s[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+    let am;
+    while ((am = anchorRe.exec(chunk)) !== null) {
+      anchors.push({
+        href: unwrapExportedHref_(am[1]),
+        text: decodeHtmlEntities_(am[2].replace(/<[^>]+>/g, '')).trim(),
+      });
+    }
+    const text = decodeHtmlEntities_(chunk.replace(/<[^>]+>/g, '')).trim();
+    if (!text) return;
+    if (anchors.length === 1 && anchors[0].text === text && anchors[0].href === text) {
+      push(anchors[0].href);
+    } else if (!anchors.length && /^https?:\/\/\S+$/.test(text)) {
+      push(text);
+    }
+  });
+  return urls;
+};
+
+export const fetchDocumentHtml_ = (file) => file.getAs('text/html').getDataAsString('UTF-8');
 
 export const warmFolderIds_ = () => {
   const raw = PropertiesService.getScriptProperties().getProperty('WARM_FOLDER_IDS') || '';
@@ -280,13 +290,9 @@ export const collectWarmUrls_ = () => {
     while (files.hasNext()) {
       const file = files.next();
       try {
-        const body = DocumentApp.openById(file.getId()).getBody();
-        for (let i = 0; i < body.getNumChildren(); i++) {
-          const el = body.getChild(i);
-          if (el.getType() !== DocumentApp.ElementType.PARAGRAPH) continue;
-          const url = standaloneLinkUrl_(el.asParagraph());
-          if (url && !urls.includes(url)) urls.push(url);
-        }
+        collectDocUrlsFromHtml_(fetchDocumentHtml_(file)).forEach((url) => {
+          if (!urls.includes(url)) urls.push(url);
+        });
       } catch (e) {
         log_(`Warm scan failed for doc ${file.getId()}: ${e.message}`);
       }
