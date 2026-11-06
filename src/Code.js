@@ -308,69 +308,51 @@ export const resolveOgData_ = (urls, budgetMs = OG_API_BUDGET_MS) => {
  *  links and resolve them all, every 6 hours (the cache TTL).
  *  ----------------------------- */
 /**
- * Decide whether a paragraph is a standalone link, from its text runs
- * ([{ content, linkUrl }]). This mirrors what blog-gas extracts with
- * DocumentApp, but works on the Docs API JSON shape instead:
- * DocumentApp.openById demands the full documents scope, while the
- * Docs API read endpoints are satisfied by documents.readonly, which
- * is all this read-only warmer should need (verified 2026-11-07:
- * warmOgCache scanned 54 docs and opened none of them).
+ * The warmer reads Docs through Drive's built-in export
+ * (File.getAs('text/html')), which works under drive.readonly.
+ * The two obvious alternatives do not work for this project
+ * (verified 2026-11-07 on staging): DocumentApp.openById demands
+ * the full documents scope, and the Docs API REST endpoints return
+ * 403 because the API is not enabled in the project's Cloud
+ * project. Exported HTML keeps link targets, so a paragraph whose
+ * whole text is one link (or a bare URL) is still detectable.
  */
-export const standaloneLinkUrlFromRuns_ = (runs) => {
-  let text = '';
-  let linkUrl = null;
-  let hasUnlinkedText = false;
-  (runs || []).forEach((run) => {
-    const chunk = String((run && run.content) || '');
-    if (!chunk) return;
-    text += chunk;
-    if (!chunk.trim()) return;
-    const link = (run && run.linkUrl) || null;
-    if (!link) {
-      hasUnlinkedText = true;
-    } else if (linkUrl && linkUrl !== link) {
-      linkUrl = '';
-      hasUnlinkedText = true;
-    } else {
-      linkUrl = link;
-    }
-  });
-  const trimmed = text.trim();
-  if (!trimmed) return null;
-  if (!hasUnlinkedText && linkUrl && trimmed === linkUrl && /^https?:\/\//.test(linkUrl)) return linkUrl;
-  if (!linkUrl && /^https?:\/\/\S+$/.test(trimmed)) return trimmed;
-  return null;
+export const unwrapExportedHref_ = (href) => {
+  const raw = decodeHtmlEntities_(String(href || ''));
+  const m = raw.match(/^https?:\/\/www\.google\.com\/url\?q=([^&]+)/);
+  if (m) {
+    try { return decodeURIComponent(m[1]); } catch (e) { return raw; }
+  }
+  return raw;
 };
 
-export const fetchDocumentJson_ = (docId) => {
-  const res = UrlFetchApp.fetch(
-    `https://docs.googleapis.com/v1/documents/${encodeURIComponent(docId)}?fields=body.content`,
-    {
-      headers: { Authorization: `Bearer ${ScriptApp.getOAuthToken()}` },
-      muteHttpExceptions: true,
-    },
-  );
-  const code = res.getResponseCode();
-  if (code < 200 || code >= 300) throw new Error(`Docs API returned ${code} for doc ${docId}`);
-  return JSON.parse(res.getContentText());
-};
-
-export const collectDocUrls_ = (doc) => {
+export const collectDocUrlsFromHtml_ = (html) => {
   const urls = [];
-  const content = (doc && doc.body && doc.body.content) || [];
-  content.forEach((el) => {
-    if (!el || !el.paragraph) return;
-    const runs = (el.paragraph.elements || []).map((pe) => {
-      const tr = pe && pe.textRun;
-      if (!tr) return null;
-      const link = tr.textStyle && tr.textStyle.link;
-      return { content: tr.content || '', linkUrl: (link && link.url) || null };
-    }).filter(Boolean);
-    const url = standaloneLinkUrlFromRuns_(runs);
-    if (url && !urls.includes(url)) urls.push(url);
+  const push = (u) => {
+    if (u && /^https?:\/\//.test(u) && !urls.includes(u)) urls.push(u);
+  };
+  String(html || '').split(/<\/p>/i).forEach((chunk) => {
+    const anchors = [];
+    const anchorRe = /<a\s[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+    let am;
+    while ((am = anchorRe.exec(chunk)) !== null) {
+      anchors.push({
+        href: unwrapExportedHref_(am[1]),
+        text: decodeHtmlEntities_(am[2].replace(/<[^>]+>/g, '')).trim(),
+      });
+    }
+    const text = decodeHtmlEntities_(chunk.replace(/<[^>]+>/g, '')).trim();
+    if (!text) return;
+    if (anchors.length === 1 && anchors[0].text === text && anchors[0].href === text) {
+      push(anchors[0].href);
+    } else if (!anchors.length && /^https?:\/\/\S+$/.test(text)) {
+      push(text);
+    }
   });
   return urls;
 };
+
+export const fetchDocumentHtml_ = (file) => file.getAs('text/html').getDataAsString('UTF-8');
 
 export const warmFolderIds_ = () => {
   const raw = PropertiesService.getScriptProperties().getProperty('WARM_FOLDER_IDS') || '';
@@ -384,7 +366,7 @@ export const collectWarmUrls_ = () => {
     while (files.hasNext()) {
       const file = files.next();
       try {
-        collectDocUrls_(fetchDocumentJson_(file.getId())).forEach((url) => {
+        collectDocUrlsFromHtml_(fetchDocumentHtml_(file)).forEach((url) => {
           if (!urls.includes(url)) urls.push(url);
         });
       } catch (e) {
