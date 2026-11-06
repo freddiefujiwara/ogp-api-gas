@@ -37,7 +37,7 @@ const mockPropertiesService = {
 };
 
 const mockUtilities = {
-  computeDigest: vi.fn().mockImplementation((algo, bytes) => [bytes.length % 256, (bytes[0] || 0) % 256]),
+  computeDigest: vi.fn().mockImplementation((algo, bytes) => [bytes.reduce((a, b) => a + b, 0) % 256, bytes[bytes.length - 1] || 0]),
   DigestAlgorithm: { MD5: 'MD5' },
   newBlob: vi.fn().mockImplementation((s) => ({
     getBytes: () => Array.from(String(s)).map((c) => c.charCodeAt(0)),
@@ -258,6 +258,54 @@ describe('ogp-api-gas Code.js', () => {
       mockUrlFetchApp.fetchAll.mockReturnValue([responseOf({ code: 500, blob: blobOf({}) })]);
       const out = Code.doGet({ parameter: { url: URL_A } });
       expect(JSON.parse(out.text)).toEqual({ url: URL_A, title: '', image: '', description: '' });
+    });
+
+    it('answers a pipe-separated urls batch in one call', () => {
+      const URL_B = 'https://example.com/page-b';
+      mockCache.getAll.mockReturnValue({
+        [Code.ogCacheKey_(URL_A)]: JSON.stringify({ title: 'Cached A', image: '', description: '' }),
+      });
+      mockUrlFetchApp.fetchAll.mockReturnValue([responseOf({ code: 404, blob: blobOf({}) })]);
+      const out = Code.doGet({ parameter: { urls: `${URL_A}|${URL_B}|not-a-url` } });
+      const parsed = JSON.parse(out.text);
+      expect(parsed.results[URL_A]).toEqual({ title: 'Cached A', image: '', description: '' });
+      expect(parsed.results[URL_B]).toBeUndefined();
+    });
+
+    it('rejects an empty urls batch', () => {
+      const out = Code.doGet({ parameter: { urls: 'not-a-url' } });
+      expect(JSON.parse(out.text)).toEqual({ error: 'urls parameter is required' });
+    });
+  });
+
+  describe('doPost', () => {
+    const postEvent = (body) => ({
+      postData: { contents: typeof body === 'string' ? body : JSON.stringify(body) },
+    });
+
+    it('rejects a request without urls', () => {
+      expect(JSON.parse(Code.doPost(postEvent({})).text)).toEqual({ error: 'urls array is required' });
+      expect(JSON.parse(Code.doPost(postEvent('not json')).text).error).toContain('invalid request');
+    });
+
+    it('returns results for many urls in one call, omitting ones without data', () => {
+      const URL_B = 'https://example.com/page-b';
+      mockCache.getAll.mockReturnValue({
+        [Code.ogCacheKey_(URL_A)]: JSON.stringify({ title: 'Cached A', image: '', description: '' }),
+      });
+      mockUrlFetchApp.fetchAll.mockReturnValue([responseOf({ code: 404, blob: blobOf({}) })]);
+      const out = Code.doPost(postEvent({ urls: [URL_A, URL_B, 'not-a-url'] }));
+      const parsed = JSON.parse(out.text);
+      expect(parsed.results[URL_A]).toEqual({ title: 'Cached A', image: '', description: '' });
+      expect(parsed.results[URL_B]).toBeUndefined();
+    });
+
+    it('fetches misses in one batched resolve', () => {
+      mockUrlFetchApp.fetchAll.mockImplementation((requests) => requests.map(() => responseOf({ blob: blobOf({ 'UTF-8': ogHtml() }) })));
+      const out = Code.doPost(postEvent({ urls: [URL_A, 'https://example.com/page-b'] }));
+      const parsed = JSON.parse(out.text);
+      expect(Object.keys(parsed.results)).toHaveLength(2);
+      expect(mockUrlFetchApp.fetchAll).toHaveBeenCalledTimes(1);
     });
   });
 

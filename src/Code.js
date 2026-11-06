@@ -21,6 +21,7 @@ export const OG_SCAN_LIMIT = 200000;
 export const OG_FETCH_BATCH_SIZE = 20;
 export const OG_API_BUDGET_MS = 40000;
 export const OG_WARM_BUDGET_MS = 300000; // stay under the 6-minute trigger cap
+export const OG_POST_MAX_URLS = 100;
 
 export const log_ = (msg) => {
   console.log(msg);
@@ -311,11 +312,53 @@ export const setupWarmTrigger = () => {
 };
 
 /** -----------------------------
- *  Web API: GET ?url=<url>
+ *  Web API: GET ?url=<url>  or  GET ?urls=<url>|<url>|...
  *  ----------------------------- */
 export const doGet = (e) => {
-  const url = String(((e && e.parameter) || {}).url || '').trim();
+  const params = (e && e.parameter) || {};
+  if (params.urls) {
+    const urls = [...new Set(String(params.urls).split('|').map((u) => u.trim()).filter((u) => /^https?:\/\//.test(u)))].slice(0, OG_POST_MAX_URLS);
+    if (!urls.length) return jsonError_('urls parameter is required');
+    const data = resolveOgData_(urls);
+    const results = {};
+    Object.keys(data).forEach((url) => {
+      const d = data[url];
+      if (d && (d.title || d.image)) {
+        results[url] = { title: d.title || '', image: d.image || '', description: d.description || '' };
+      }
+    });
+    return json_({ results });
+  }
+  const url = String(params.url || '').trim();
   if (!/^https?:\/\//.test(url)) return jsonError_('url parameter is required');
   const data = resolveOgData_([url])[url] || {};
   return json_({ url, title: data.title || '', image: data.image || '', description: data.description || '' });
+};
+
+/**
+ * Batch lookup for callers converting documents with many links:
+ * POST a JSON body { "urls": ["https://...", ...] } and get back
+ * { "results": { url: { title, image, description } } }.
+ * One HTTP round trip per batch keeps GAS-to-GAS overhead low, and
+ * URLs with no usable OG data are simply absent from the results.
+ */
+export const doPost = (e) => {
+  try {
+    const body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    const urls = (Array.isArray(body.urls) ? body.urls : [])
+      .map((u) => String(u || '').trim())
+      .filter((u) => /^https?:\/\//.test(u));
+    if (!urls.length) return jsonError_('urls array is required');
+    const data = resolveOgData_([...new Set(urls)].slice(0, OG_POST_MAX_URLS));
+    const results = {};
+    Object.keys(data).forEach((url) => {
+      const d = data[url];
+      if (d && (d.title || d.image)) {
+        results[url] = { title: d.title || '', image: d.image || '', description: d.description || '' };
+      }
+    });
+    return json_({ results });
+  } catch (err) {
+    return jsonError_(`invalid request: ${err.message}`);
+  }
 };
