@@ -253,10 +253,33 @@ describe('ogp-api-gas Code.js', () => {
       mockProperties.getProperty.mockImplementation((k) => (k === 'LIST_DATA_URL' ? LIST_URL : null));
     });
 
-    it('builds card descriptions from price and unit only (the comment lives below the card)', () => {
+    it('builds card descriptions from price, unit and properties (never the comment)', () => {
       expect(Code.listDataDescription_(sheetItem)).toBe('¥1,500 ×2');
       expect(Code.listDataDescription_({ ...sheetItem, unit: 1 })).toBe('¥1,500');
       expect(Code.listDataDescription_({ ...sheetItem, price: 0 })).toBe('');
+      // the sheet comment ('ブラック') never leaks into the description,
+      // even when a same-named property is present via props
+      expect(
+        Code.listDataDescription_({ ...sheetItem, props: 'CLX60X02WH ホワイト' })
+      ).toBe('¥1,500 ×2 CLX60X02WH ホワイト');
+      expect(Code.listDataDescription_({ ...sheetItem, price: 0, props: '特大' })).toBe('特大');
+      const longProps = 'あ'.repeat(120);
+      const capped = Code.listDataDescription_({ ...sheetItem, price: 0, props: longProps });
+      expect(capped).toBe(`${'あ'.repeat(90)}…`);
+    });
+
+    it('prefers the short product name for list card titles', () => {
+      mockUrlFetchApp.fetch.mockImplementation((url) => {
+        if (url === LIST_URL) {
+          return responseOf({
+            text: JSON.stringify([{ ...sheetItem, shortTitle: '短い商品名', props: '型番X' }]),
+          });
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      });
+      const result = Code.resolveOgData_([URL_A]);
+      expect(result[URL_A].title).toBe('短い商品名');
+      expect(result[URL_A].description).toBe('¥1,500 ×2 型番X');
     });
 
     it('answers a miss from the list data without fetching any page', () => {
