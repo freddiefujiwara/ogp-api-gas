@@ -253,10 +253,10 @@ describe('ogp-api-gas Code.js', () => {
       mockProperties.getProperty.mockImplementation((k) => (k === 'LIST_DATA_URL' ? LIST_URL : null));
     });
 
-    it('builds card descriptions from price, unit and comment', () => {
-      expect(Code.listDataDescription_(sheetItem)).toBe('¥1,500 ×2 ブラック');
-      expect(Code.listDataDescription_({ ...sheetItem, unit: 1 })).toBe('¥1,500 ブラック');
-      expect(Code.listDataDescription_({ ...sheetItem, price: 0, comment: '' })).toBe('');
+    it('builds card descriptions from price and unit only (the comment lives below the card)', () => {
+      expect(Code.listDataDescription_(sheetItem)).toBe('¥1,500 ×2');
+      expect(Code.listDataDescription_({ ...sheetItem, unit: 1 })).toBe('¥1,500');
+      expect(Code.listDataDescription_({ ...sheetItem, price: 0 })).toBe('');
     });
 
     it('answers a miss from the list data without fetching any page', () => {
@@ -266,12 +266,33 @@ describe('ogp-api-gas Code.js', () => {
       });
       const result = Code.resolveOgData_([URL_A]);
       expect(result[URL_A]).toEqual({
-        title: 'シートの商品', image: 'https://example.com/sheet.jpg', description: '¥1,500 ×2 ブラック',
+        title: 'シートの商品', image: 'https://example.com/sheet.jpg', description: '¥1,500 ×2',
       });
       expect(mockUrlFetchApp.fetchAll).not.toHaveBeenCalled();
       expect(mockCache.put).toHaveBeenCalledWith(
         Code.ogCacheKey_(URL_A), expect.stringContaining('シートの商品'), Code.OG_CACHE_TTL,
       );
+    });
+
+    it('uses the fallback image for list items whose image is empty', () => {
+      mockUrlFetchApp.fetch.mockImplementation((url) => {
+        if (url === LIST_URL) return responseOf({ text: JSON.stringify([{ ...sheetItem, image: '' }]) });
+        throw new Error(`unexpected fetch: ${url}`);
+      });
+      const result = Code.resolveOgData_([URL_A]);
+      expect(result[URL_A].image).toBe(Code.LIST_FALLBACK_IMAGE);
+    });
+
+    it('answers a percent-encoded URL from list data keyed by the raw URL', () => {
+      const rawUrl = 'https://www.google.com/search?q=ワークマン 手袋';
+      const encodedUrl = 'https://www.google.com/search?q=%E3%83%AF%E3%83%BC%E3%82%AF%E3%83%9E%E3%83%B3%20%E6%89%8B%E8%A2%8B';
+      mockUrlFetchApp.fetch.mockImplementation((url) => {
+        if (url === LIST_URL) return responseOf({ text: JSON.stringify([{ ...sheetItem, url: rawUrl }]) });
+        throw new Error(`unexpected fetch: ${url}`);
+      });
+      const result = Code.resolveOgData_([encodedUrl]);
+      expect(result[encodedUrl].title).toBe('シートの商品');
+      expect(mockUrlFetchApp.fetchAll).not.toHaveBeenCalled();
     });
 
     it('falls through to page fetching for URLs not in the list', () => {

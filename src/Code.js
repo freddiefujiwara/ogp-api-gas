@@ -31,6 +31,9 @@ export const OG_WARM_BUDGET_MS = 300000; // stay under the 6-minute trigger cap
 export const OG_POST_MAX_URLS = 100;
 export const LIST_DATA_CACHE_KEY = 'list-data:map';
 export const LIST_DATA_CACHE_TTL = 3600; // list data changes rarely; 1 hour is plenty
+// Same placeholder the List of stuff front-end uses for items whose
+// image is missing, so list cards never render imageless.
+export const LIST_FALLBACK_IMAGE = 'https://tshop.r10s.jp/rukusu/cabinet/images/junbi.jpg';
 
 export const log_ = (msg) => {
   console.log(msg);
@@ -147,17 +150,14 @@ export const decodeBody_ = (blob, headerCharset) => {
  *  served as JSON by list-of-stuff-gas (LIST_DATA_URL property).
  *  ----------------------------- */
 export const listDataDescription_ = (item) => {
-  const parts = [];
+  // Price only: the item's comment is printed as text below the card
+  // by the article generator, so repeating it here would duplicate it.
   const price = Number(item && item.price);
-  if (price > 0) {
-    let head = `¥${price.toLocaleString('ja-JP')}`;
-    const unit = Number(item && item.unit);
-    if (unit > 1) head += ` ×${unit}`;
-    parts.push(head);
-  }
-  const comment = String((item && item.comment) || '').trim();
-  if (comment) parts.push(comment);
-  return parts.join(' ').slice(0, OG_DESCRIPTION_LIMIT);
+  if (!(price > 0)) return '';
+  let head = `¥${price.toLocaleString('ja-JP')}`;
+  const unit = Number(item && item.unit);
+  if (unit > 1) head += ` ×${unit}`;
+  return head;
 };
 
 export const fetchListDataMap_ = () => {
@@ -177,7 +177,7 @@ export const fetchListDataMap_ = () => {
     if (!item || !item.url || !item.title) return;
     map[String(item.url)] = {
       title: String(item.title || ''),
-      image: String(item.image || ''),
+      image: String(item.image || '') || LIST_FALLBACK_IMAGE,
       description: listDataDescription_(item),
     };
   });
@@ -234,7 +234,12 @@ export const resolveOgData_ = (urls, budgetMs = OG_API_BUDGET_MS) => {
       if (listMap) {
         fetchMisses = [];
         misses.forEach((url) => {
-          const d = listMap[url];
+          let d = listMap[url];
+          if (!d) {
+            // Article URLs are percent-encoded, while the map is keyed
+            // by the raw sheet URLs — try the decoded form too.
+            try { d = listMap[decodeURIComponent(url)]; } catch (e) { /* keep undefined */ }
+          }
           if (d && (d.title || d.image)) {
             storeResult_(url, d);
           } else {
