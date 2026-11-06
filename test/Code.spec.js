@@ -369,39 +369,28 @@ describe('ogp-api-gas Code.js', () => {
   });
 
   describe('warming', () => {
-    it('collectDocUrlsFromHtml_ detects a linked URL paragraph', () => {
-      const html = `<p class="c1"><span><a href="${URL_A}">${URL_A}</a></span></p>`;
-      expect(Code.collectDocUrlsFromHtml_(html)).toEqual([URL_A]);
+    it('collectDocUrlsFromText_ collects lines that are exactly a URL and dedupes', () => {
+      const text = `Title line\n${URL_A}\nsee ${URL_A} for details\n${URL_A}\n  https://example.com/page-b  \n`;
+      expect(Code.collectDocUrlsFromText_(text)).toEqual([URL_A, 'https://example.com/page-b']);
     });
 
-    it('collectDocUrlsFromHtml_ detects a bare URL paragraph and dedupes', () => {
-      const html = `<p>${URL_A}</p><p><a href="${URL_A}">${URL_A}</a></p><p>just text</p>`;
-      expect(Code.collectDocUrlsFromHtml_(html)).toEqual([URL_A]);
-    });
-
-    it('collectDocUrlsFromHtml_ ignores anchor text that is not the URL itself', () => {
-      expect(Code.collectDocUrlsFromHtml_(`<p><a href="${URL_A}">click here</a></p>`)).toEqual([]);
-      expect(Code.collectDocUrlsFromHtml_(`<p>see <a href="${URL_A}">${URL_A}</a></p>`)).toEqual([]);
-    });
-
-    it('collectDocUrlsFromHtml_ unwraps Google redirect hrefs', () => {
-      const wrapped = `https://www.google.com/url?q=${encodeURIComponent(URL_A)}&amp;sa=D`;
-      expect(Code.collectDocUrlsFromHtml_(`<p><a href="${wrapped}">${URL_A}</a></p>`)).toEqual([URL_A]);
+    it('collectDocUrlsFromText_ returns nothing for prose without standalone URLs', () => {
+      expect(Code.collectDocUrlsFromText_('ただの文章です\nリンクはありません')).toEqual([]);
     });
 
     it('collectWarmUrls_ exports docs through Drive and dedupes', () => {
       mockProperties.getProperty.mockImplementation((k) => (k === 'WARM_FOLDER_IDS' ? 'folder-1' : null));
-      const html = `<p><a href="${URL_A}">${URL_A}</a></p><p>${URL_A}</p><p>text</p>`;
+      const text = `記事タイトル\n${URL_A}\n本文です\n${URL_A}\n`;
       const files = [{
         getId: () => 'doc-1',
-        getAs: vi.fn(() => ({ getDataAsString: () => html })),
+        getAs: vi.fn(() => ({ getDataAsString: () => text })),
       }];
       let i = 0;
       mockDriveApp.getFolderById.mockReturnValue({
         getFilesByType: () => ({ hasNext: () => i < files.length, next: () => files[i++] }),
       });
       expect(Code.collectWarmUrls_()).toEqual([URL_A]);
-      expect(files[0].getAs).toHaveBeenCalledWith('text/html');
+      expect(files[0].getAs).toHaveBeenCalledWith('text/plain');
     });
 
     it('collectWarmUrls_ skips a doc whose export fails', () => {

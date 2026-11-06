@@ -308,51 +308,28 @@ export const resolveOgData_ = (urls, budgetMs = OG_API_BUDGET_MS) => {
  *  links and resolve them all, every 6 hours (the cache TTL).
  *  ----------------------------- */
 /**
- * The warmer reads Docs through Drive's built-in export
- * (File.getAs('text/html')), which works under drive.readonly.
- * The two obvious alternatives do not work for this project
- * (verified 2026-11-07 on staging): DocumentApp.openById demands
- * the full documents scope, and the Docs API REST endpoints return
- * 403 because the API is not enabled in the project's Cloud
- * project. Exported HTML keeps link targets, so a paragraph whose
- * whole text is one link (or a bare URL) is still detectable.
+ * The warmer reads Docs through Drive's built-in plain-text export
+ * (File.getAs('text/plain')), which works under drive.readonly.
+ * The alternatives do not work for this project (all verified
+ * 2026-11-07 on staging): DocumentApp.openById demands the full
+ * documents scope; the Docs API REST endpoints return 403 because
+ * the API is not enabled in the project's Cloud project; and
+ * getAs('text/html') refuses the conversion for Google Docs.
+ * Plain text loses link targets whose anchor text differs from the
+ * URL — but those are not standalone links anyway. A paragraph that
+ * is just a URL (linked or not) exports as a line holding exactly
+ * that URL, which is precisely what the warmer needs.
  */
-export const unwrapExportedHref_ = (href) => {
-  const raw = decodeHtmlEntities_(String(href || ''));
-  const m = raw.match(/^https?:\/\/www\.google\.com\/url\?q=([^&]+)/);
-  if (m) {
-    try { return decodeURIComponent(m[1]); } catch (e) { return raw; }
-  }
-  return raw;
-};
-
-export const collectDocUrlsFromHtml_ = (html) => {
+export const collectDocUrlsFromText_ = (text) => {
   const urls = [];
-  const push = (u) => {
-    if (u && /^https?:\/\//.test(u) && !urls.includes(u)) urls.push(u);
-  };
-  String(html || '').split(/<\/p>/i).forEach((chunk) => {
-    const anchors = [];
-    const anchorRe = /<a\s[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
-    let am;
-    while ((am = anchorRe.exec(chunk)) !== null) {
-      anchors.push({
-        href: unwrapExportedHref_(am[1]),
-        text: decodeHtmlEntities_(am[2].replace(/<[^>]+>/g, '')).trim(),
-      });
-    }
-    const text = decodeHtmlEntities_(chunk.replace(/<[^>]+>/g, '')).trim();
-    if (!text) return;
-    if (anchors.length === 1 && anchors[0].text === text && anchors[0].href === text) {
-      push(anchors[0].href);
-    } else if (!anchors.length && /^https?:\/\/\S+$/.test(text)) {
-      push(text);
-    }
+  String(text || '').split(/\r?\n/).forEach((line) => {
+    const trimmed = line.trim();
+    if (/^https?:\/\/\S+$/.test(trimmed) && !urls.includes(trimmed)) urls.push(trimmed);
   });
   return urls;
 };
 
-export const fetchDocumentHtml_ = (file) => file.getAs('text/html').getDataAsString('UTF-8');
+export const fetchDocumentText_ = (file) => file.getAs('text/plain').getDataAsString('UTF-8');
 
 export const warmFolderIds_ = () => {
   const raw = PropertiesService.getScriptProperties().getProperty('WARM_FOLDER_IDS') || '';
@@ -366,7 +343,7 @@ export const collectWarmUrls_ = () => {
     while (files.hasNext()) {
       const file = files.next();
       try {
-        collectDocUrlsFromHtml_(fetchDocumentHtml_(file)).forEach((url) => {
+        collectDocUrlsFromText_(fetchDocumentText_(file)).forEach((url) => {
           if (!urls.includes(url)) urls.push(url);
         });
       } catch (e) {
