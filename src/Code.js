@@ -29,8 +29,11 @@ export const OG_FETCH_BATCH_SIZE = 20;
 export const OG_API_BUDGET_MS = 40000;
 export const OG_WARM_BUDGET_MS = 300000; // stay under the 6-minute trigger cap
 export const OG_POST_MAX_URLS = 100;
-export const LIST_DATA_CACHE_KEY = 'list-data:map';
+export const LIST_DATA_CACHE_KEY = 'list-data:map:v2';
 export const LIST_DATA_CACHE_TTL = 3600; // list data changes rarely; 1 hour is plenty
+// Card descriptions stay glanceable: the property remainder of a
+// shop title can run to hundreds of characters, so it is capped.
+export const LIST_PROPS_LIMIT = 90;
 // Same placeholder the List of stuff front-end uses for items whose
 // image is missing, so list cards never render imageless.
 export const LIST_FALLBACK_IMAGE = 'https://tshop.r10s.jp/rukusu/cabinet/images/junbi.jpg';
@@ -51,7 +54,11 @@ export const jsonError_ = (error) => json_({ error });
 export const ogCacheKey_ = (url) => {
   const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, Utilities.newBlob(url).getBytes())
     .map((b) => ((b + 256) % 256).toString(16).padStart(2, '0')).join('');
-  return `og:${digest}`;
+  // v2: card titles/descriptions changed shape (short product name,
+  // price + properties), so entries written by the old shape — some
+  // still carrying item comments in the description — are abandoned
+  // rather than served until their TTL runs out.
+  return `og:v2:${digest}`;
 };
 
 export const decodeHtmlEntities_ = (s) => String(s || '').replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, (whole, body) => {
@@ -150,14 +157,26 @@ export const decodeBody_ = (blob, headerCharset) => {
  *  served as JSON by list-of-stuff-gas (LIST_DATA_URL property).
  *  ----------------------------- */
 export const listDataDescription_ = (item) => {
-  // Price only: the item's comment is printed as text below the card
-  // by the article generator, so repeating it here would duplicate it.
+  // Price plus the title's property remainder (model number, size,
+  // compatibility...), as prepared by list-of-stuff-gas's splitTitle.
+  // The item's comment is never included: the article generator
+  // prints it as text below the card, and a card description is the
+  // wrong place for it.
+  const parts = [];
   const price = Number(item && item.price);
-  if (!(price > 0)) return '';
-  let head = `¥${price.toLocaleString('ja-JP')}`;
-  const unit = Number(item && item.unit);
-  if (unit > 1) head += ` ×${unit}`;
-  return head;
+  if (price > 0) {
+    let head = `¥${price.toLocaleString('ja-JP')}`;
+    const unit = Number(item && item.unit);
+    if (unit > 1) head += ` ×${unit}`;
+    parts.push(head);
+  }
+  const props = String((item && item.props) || '').trim();
+  if (props) {
+    parts.push(
+      props.length > LIST_PROPS_LIMIT ? `${props.slice(0, LIST_PROPS_LIMIT)}…` : props
+    );
+  }
+  return parts.join(' ');
 };
 
 export const fetchListDataMap_ = () => {
@@ -176,7 +195,7 @@ export const fetchListDataMap_ = () => {
   (Array.isArray(items) ? items : []).forEach((item) => {
     if (!item || !item.url || !item.title) return;
     map[String(item.url)] = {
-      title: String(item.title || ''),
+      title: String(item.shortTitle || item.title || ''),
       image: String(item.image || '') || LIST_FALLBACK_IMAGE,
       description: listDataDescription_(item),
     };
