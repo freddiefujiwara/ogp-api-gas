@@ -61,6 +61,7 @@ const mockScriptApp = {
   getProjectTriggers: vi.fn().mockReturnValue([]),
   deleteTrigger: vi.fn(),
   newTrigger: vi.fn(),
+  getOAuthToken: vi.fn().mockReturnValue('test-token'),
 };
 
 global.CacheService = mockCacheService;
@@ -84,10 +85,11 @@ const blobOf = (byCharset) => ({
   getDataAsString: vi.fn((cs) => byCharset[cs] ?? byCharset['UTF-8'] ?? ''),
 });
 
-const responseOf = ({ code = 200, headers = {}, blob }) => ({
+const responseOf = ({ code = 200, headers = {}, blob, text = '' }) => ({
   getResponseCode: () => code,
   getHeaders: () => headers,
   getBlob: () => blob,
+  getContentText: () => text,
 });
 
 const URL_A = 'https://example.com/page-a';
@@ -310,40 +312,52 @@ describe('ogp-api-gas Code.js', () => {
   });
 
   describe('warming', () => {
-    const linkPara = (url) => ({
-      getType: () => 'PARAGRAPH',
-      asParagraph: () => ({
-        getNumChildren: () => 1,
-        getChild: () => ({
-          getType: () => 'TEXT',
-          asText: () => ({
-            getText: () => url,
-            getTextAttributeIndices: () => [0],
-            getAttributes: () => ({ LINK_URL: url }),
-          }),
-        }),
-      }),
+    it('standaloneLinkUrlFromRuns_ detects a linked URL paragraph', () => {
+      expect(Code.standaloneLinkUrlFromRuns_([{ content: `${URL_A}\n`, linkUrl: URL_A }])).toBe(URL_A);
     });
 
-    it('standaloneLinkUrl_ detects a bare link paragraph', () => {
-      const p = linkPara(URL_A).asParagraph();
-      expect(Code.standaloneLinkUrl_(p)).toBe(URL_A);
+    it('standaloneLinkUrlFromRuns_ detects a bare URL paragraph', () => {
+      expect(Code.standaloneLinkUrlFromRuns_([{ content: `${URL_A}\n`, linkUrl: null }])).toBe(URL_A);
     });
 
-    it('collectWarmUrls_ scans the configured folders and dedupes', () => {
+    it('standaloneLinkUrlFromRuns_ ignores anchor text that is not the URL itself', () => {
+      expect(Code.standaloneLinkUrlFromRuns_([{ content: 'click here\n', linkUrl: URL_A }])).toBeNull();
+      expect(Code.standaloneLinkUrlFromRuns_([{ content: 'see ', linkUrl: null }, { content: URL_A, linkUrl: URL_A }])).toBeNull();
+    });
+
+    it('collectWarmUrls_ reads docs through the Docs API and dedupes', () => {
       mockProperties.getProperty.mockImplementation((k) => (k === 'WARM_FOLDER_IDS' ? 'folder-1' : null));
       const files = [{ getId: () => 'doc-1' }];
       let i = 0;
       mockDriveApp.getFolderById.mockReturnValue({
         getFilesByType: () => ({ hasNext: () => i < files.length, next: () => files[i++] }),
       });
-      mockDocumentApp.openById.mockReturnValue({
-        getBody: () => ({
-          getNumChildren: () => 2,
-          getChild: () => linkPara(URL_A),
-        }),
-      });
+      const docJson = {
+        body: {
+          content: [
+            { paragraph: { elements: [{ textRun: { content: `${URL_A}\n`, textStyle: { link: { url: URL_A } } } }] } },
+            { paragraph: { elements: [{ textRun: { content: `${URL_A}\n` } }] } },
+            { paragraph: { elements: [{ textRun: { content: 'just text\n' } }] } },
+            { sectionBreak: {} },
+          ],
+        },
+      };
+      mockUrlFetchApp.fetch.mockReturnValue(responseOf({ text: JSON.stringify(docJson) }));
       expect(Code.collectWarmUrls_()).toEqual([URL_A]);
+      const [calledUrl, calledOpts] = mockUrlFetchApp.fetch.mock.calls[0];
+      expect(calledUrl).toContain('https://docs.googleapis.com/v1/documents/doc-1');
+      expect(calledOpts.headers.Authorization).toBe('Bearer test-token');
+    });
+
+    it('collectWarmUrls_ skips a doc the Docs API refuses', () => {
+      mockProperties.getProperty.mockImplementation((k) => (k === 'WARM_FOLDER_IDS' ? 'folder-1' : null));
+      const files = [{ getId: () => 'doc-1' }];
+      let i = 0;
+      mockDriveApp.getFolderById.mockReturnValue({
+        getFilesByType: () => ({ hasNext: () => i < files.length, next: () => files[i++] }),
+      });
+      mockUrlFetchApp.fetch.mockReturnValue(responseOf({ code: 403, text: 'forbidden' }));
+      expect(Code.collectWarmUrls_()).toEqual([]);
     });
 
     it('setupWarmTrigger replaces existing warm triggers with one 6-hour trigger', () => {

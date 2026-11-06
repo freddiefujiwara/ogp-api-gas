@@ -231,41 +231,69 @@ export const resolveOgData_ = (urls, budgetMs = OG_API_BUDGET_MS) => {
  *  Cache warming: scan the configured folders' Docs for standalone
  *  links and resolve them all, every 6 hours (the cache TTL).
  *  ----------------------------- */
-export const standaloneLinkUrl_ = (p) => {
+/**
+ * Decide whether a paragraph is a standalone link, from its text runs
+ * ([{ content, linkUrl }]). This mirrors what blog-gas extracts with
+ * DocumentApp, but works on the Docs API JSON shape instead:
+ * DocumentApp.openById demands the full documents scope, while the
+ * Docs API read endpoints are satisfied by documents.readonly, which
+ * is all this read-only warmer should need (verified 2026-11-07:
+ * warmOgCache scanned 54 docs and opened none of them).
+ */
+export const standaloneLinkUrlFromRuns_ = (runs) => {
   let text = '';
   let linkUrl = null;
   let hasUnlinkedText = false;
-  for (let i = 0; i < p.getNumChildren(); i++) {
-    const child = p.getChild(i);
-    if (child.getType() !== DocumentApp.ElementType.TEXT) return null;
-    const textEl = child.asText();
-    const fullText = textEl.getText() || '';
-    if (!fullText) continue;
-    text += fullText;
-    const indices = textEl.getTextAttributeIndices() || [];
-    if (indices.length === 0 || indices[0] !== 0) indices.unshift(0);
-    if (indices[indices.length - 1] !== fullText.length) indices.push(fullText.length);
-    for (let k = 0; k < indices.length - 1; k++) {
-      const start = indices[k];
-      const end = indices[k + 1];
-      if (start >= end) continue;
-      const chunk = fullText.substring(start, end);
-      if (!chunk.trim()) continue;
-      const link = (textEl.getAttributes(start) || {})[DocumentApp.Attribute.LINK_URL];
-      if (!link) {
-        hasUnlinkedText = true;
-      } else if (linkUrl && linkUrl !== link) {
-        return null;
-      } else {
-        linkUrl = link;
-      }
+  (runs || []).forEach((run) => {
+    const chunk = String((run && run.content) || '');
+    if (!chunk) return;
+    text += chunk;
+    if (!chunk.trim()) return;
+    const link = (run && run.linkUrl) || null;
+    if (!link) {
+      hasUnlinkedText = true;
+    } else if (linkUrl && linkUrl !== link) {
+      linkUrl = '';
+      hasUnlinkedText = true;
+    } else {
+      linkUrl = link;
     }
-  }
+  });
   const trimmed = text.trim();
   if (!trimmed) return null;
   if (!hasUnlinkedText && linkUrl && trimmed === linkUrl && /^https?:\/\//.test(linkUrl)) return linkUrl;
   if (!linkUrl && /^https?:\/\/\S+$/.test(trimmed)) return trimmed;
   return null;
+};
+
+export const fetchDocumentJson_ = (docId) => {
+  const res = UrlFetchApp.fetch(
+    `https://docs.googleapis.com/v1/documents/${encodeURIComponent(docId)}?fields=body.content`,
+    {
+      headers: { Authorization: `Bearer ${ScriptApp.getOAuthToken()}` },
+      muteHttpExceptions: true,
+    },
+  );
+  const code = res.getResponseCode();
+  if (code < 200 || code >= 300) throw new Error(`Docs API returned ${code} for doc ${docId}`);
+  return JSON.parse(res.getContentText());
+};
+
+export const collectDocUrls_ = (doc) => {
+  const urls = [];
+  const content = (doc && doc.body && doc.body.content) || [];
+  content.forEach((el) => {
+    if (!el || !el.paragraph) return;
+    const runs = (el.paragraph.elements || []).map((pe) => {
+      const tr = pe && pe.textRun;
+      if (!tr) return null;
+      const link = tr.textStyle && tr.textStyle.link;
+      return { content: tr.content || '', linkUrl: (link && link.url) || null };
+    }).filter(Boolean);
+    const url = standaloneLinkUrlFromRuns_(runs);
+    if (url && !urls.includes(url)) urls.push(url);
+  });
+  return urls;
 };
 
 export const warmFolderIds_ = () => {
@@ -280,13 +308,9 @@ export const collectWarmUrls_ = () => {
     while (files.hasNext()) {
       const file = files.next();
       try {
-        const body = DocumentApp.openById(file.getId()).getBody();
-        for (let i = 0; i < body.getNumChildren(); i++) {
-          const el = body.getChild(i);
-          if (el.getType() !== DocumentApp.ElementType.PARAGRAPH) continue;
-          const url = standaloneLinkUrl_(el.asParagraph());
-          if (url && !urls.includes(url)) urls.push(url);
-        }
+        collectDocUrls_(fetchDocumentJson_(file.getId())).forEach((url) => {
+          if (!urls.includes(url)) urls.push(url);
+        });
       } catch (e) {
         log_(`Warm scan failed for doc ${file.getId()}: ${e.message}`);
       }
