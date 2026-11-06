@@ -312,51 +312,51 @@ describe('ogp-api-gas Code.js', () => {
   });
 
   describe('warming', () => {
-    it('standaloneLinkUrlFromRuns_ detects a linked URL paragraph', () => {
-      expect(Code.standaloneLinkUrlFromRuns_([{ content: `${URL_A}\n`, linkUrl: URL_A }])).toBe(URL_A);
+    it('collectDocUrlsFromHtml_ detects a linked URL paragraph', () => {
+      const html = `<p class="c1"><span><a href="${URL_A}">${URL_A}</a></span></p>`;
+      expect(Code.collectDocUrlsFromHtml_(html)).toEqual([URL_A]);
     });
 
-    it('standaloneLinkUrlFromRuns_ detects a bare URL paragraph', () => {
-      expect(Code.standaloneLinkUrlFromRuns_([{ content: `${URL_A}\n`, linkUrl: null }])).toBe(URL_A);
+    it('collectDocUrlsFromHtml_ detects a bare URL paragraph and dedupes', () => {
+      const html = `<p>${URL_A}</p><p><a href="${URL_A}">${URL_A}</a></p><p>just text</p>`;
+      expect(Code.collectDocUrlsFromHtml_(html)).toEqual([URL_A]);
     });
 
-    it('standaloneLinkUrlFromRuns_ ignores anchor text that is not the URL itself', () => {
-      expect(Code.standaloneLinkUrlFromRuns_([{ content: 'click here\n', linkUrl: URL_A }])).toBeNull();
-      expect(Code.standaloneLinkUrlFromRuns_([{ content: 'see ', linkUrl: null }, { content: URL_A, linkUrl: URL_A }])).toBeNull();
+    it('collectDocUrlsFromHtml_ ignores anchor text that is not the URL itself', () => {
+      expect(Code.collectDocUrlsFromHtml_(`<p><a href="${URL_A}">click here</a></p>`)).toEqual([]);
+      expect(Code.collectDocUrlsFromHtml_(`<p>see <a href="${URL_A}">${URL_A}</a></p>`)).toEqual([]);
     });
 
-    it('collectWarmUrls_ reads docs through the Docs API and dedupes', () => {
+    it('collectDocUrlsFromHtml_ unwraps Google redirect hrefs', () => {
+      const wrapped = `https://www.google.com/url?q=${encodeURIComponent(URL_A)}&amp;sa=D`;
+      expect(Code.collectDocUrlsFromHtml_(`<p><a href="${wrapped}">${URL_A}</a></p>`)).toEqual([URL_A]);
+    });
+
+    it('collectWarmUrls_ exports docs through Drive and dedupes', () => {
       mockProperties.getProperty.mockImplementation((k) => (k === 'WARM_FOLDER_IDS' ? 'folder-1' : null));
-      const files = [{ getId: () => 'doc-1' }];
+      const html = `<p><a href="${URL_A}">${URL_A}</a></p><p>${URL_A}</p><p>text</p>`;
+      const files = [{
+        getId: () => 'doc-1',
+        getAs: vi.fn(() => ({ getDataAsString: () => html })),
+      }];
       let i = 0;
       mockDriveApp.getFolderById.mockReturnValue({
         getFilesByType: () => ({ hasNext: () => i < files.length, next: () => files[i++] }),
       });
-      const docJson = {
-        body: {
-          content: [
-            { paragraph: { elements: [{ textRun: { content: `${URL_A}\n`, textStyle: { link: { url: URL_A } } } }] } },
-            { paragraph: { elements: [{ textRun: { content: `${URL_A}\n` } }] } },
-            { paragraph: { elements: [{ textRun: { content: 'just text\n' } }] } },
-            { sectionBreak: {} },
-          ],
-        },
-      };
-      mockUrlFetchApp.fetch.mockReturnValue(responseOf({ text: JSON.stringify(docJson) }));
       expect(Code.collectWarmUrls_()).toEqual([URL_A]);
-      const [calledUrl, calledOpts] = mockUrlFetchApp.fetch.mock.calls[0];
-      expect(calledUrl).toContain('https://docs.googleapis.com/v1/documents/doc-1');
-      expect(calledOpts.headers.Authorization).toBe('Bearer test-token');
+      expect(files[0].getAs).toHaveBeenCalledWith('text/html');
     });
 
-    it('collectWarmUrls_ skips a doc the Docs API refuses', () => {
+    it('collectWarmUrls_ skips a doc whose export fails', () => {
       mockProperties.getProperty.mockImplementation((k) => (k === 'WARM_FOLDER_IDS' ? 'folder-1' : null));
-      const files = [{ getId: () => 'doc-1' }];
+      const files = [{
+        getId: () => 'doc-1',
+        getAs: vi.fn(() => { throw new Error('export failed'); }),
+      }];
       let i = 0;
       mockDriveApp.getFolderById.mockReturnValue({
         getFilesByType: () => ({ hasNext: () => i < files.length, next: () => files[i++] }),
       });
-      mockUrlFetchApp.fetch.mockReturnValue(responseOf({ code: 403, text: 'forbidden' }));
       expect(Code.collectWarmUrls_()).toEqual([]);
     });
 
