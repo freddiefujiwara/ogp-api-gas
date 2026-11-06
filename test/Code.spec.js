@@ -378,31 +378,28 @@ describe('ogp-api-gas Code.js', () => {
       expect(Code.collectDocUrlsFromText_('ただの文章です\nリンクはありません')).toEqual([]);
     });
 
-    it('collectWarmUrls_ exports docs through Drive and dedupes', () => {
+    it('collectWarmUrls_ reads docs through the web export endpoint and dedupes', () => {
       mockProperties.getProperty.mockImplementation((k) => (k === 'WARM_FOLDER_IDS' ? 'folder-1' : null));
-      const text = `記事タイトル\n${URL_A}\n本文です\n${URL_A}\n`;
-      const files = [{
-        getId: () => 'doc-1',
-        getAs: vi.fn(() => ({ getDataAsString: () => text })),
-      }];
+      const files = [{ getId: () => 'doc-1' }];
       let i = 0;
       mockDriveApp.getFolderById.mockReturnValue({
         getFilesByType: () => ({ hasNext: () => i < files.length, next: () => files[i++] }),
       });
+      mockUrlFetchApp.fetch.mockReturnValue(responseOf({ text: `記事タイトル\n${URL_A}\n本文です\n${URL_A}\n` }));
       expect(Code.collectWarmUrls_()).toEqual([URL_A]);
-      expect(files[0].getAs).toHaveBeenCalledWith('text/plain');
+      const [calledUrl, calledOpts] = mockUrlFetchApp.fetch.mock.calls[0];
+      expect(calledUrl).toBe('https://docs.google.com/document/d/doc-1/export?format=txt');
+      expect(calledOpts.headers.Authorization).toBe('Bearer test-token');
     });
 
     it('collectWarmUrls_ skips a doc whose export fails', () => {
       mockProperties.getProperty.mockImplementation((k) => (k === 'WARM_FOLDER_IDS' ? 'folder-1' : null));
-      const files = [{
-        getId: () => 'doc-1',
-        getAs: vi.fn(() => { throw new Error('export failed'); }),
-      }];
+      const files = [{ getId: () => 'doc-1' }];
       let i = 0;
       mockDriveApp.getFolderById.mockReturnValue({
         getFilesByType: () => ({ hasNext: () => i < files.length, next: () => files[i++] }),
       });
+      mockUrlFetchApp.fetch.mockReturnValue(responseOf({ code: 403, text: 'forbidden' }));
       expect(Code.collectWarmUrls_()).toEqual([]);
     });
 

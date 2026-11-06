@@ -308,13 +308,16 @@ export const resolveOgData_ = (urls, budgetMs = OG_API_BUDGET_MS) => {
  *  links and resolve them all, every 6 hours (the cache TTL).
  *  ----------------------------- */
 /**
- * The warmer reads Docs through Drive's built-in plain-text export
- * (File.getAs('text/plain')), which works under drive.readonly.
- * The alternatives do not work for this project (all verified
- * 2026-11-07 on staging): DocumentApp.openById demands the full
- * documents scope; the Docs API REST endpoints return 403 because
- * the API is not enabled in the project's Cloud project; and
- * getAs('text/html') refuses the conversion for Google Docs.
+ * The warmer reads Docs through the Docs web export endpoint
+ * (docs.google.com/document/d/<id>/export?format=txt), called with
+ * the script's own OAuth token. That endpoint is served by the
+ * Docs app itself, not by the Docs API, so it works under
+ * drive.readonly without any API enablement. The alternatives do
+ * not work for this project (all verified 2026-11-07 on staging):
+ * DocumentApp.openById demands the full documents scope; the Docs
+ * API REST endpoints return 403 because the API is not enabled in
+ * the project's Cloud project; and Drive's File.getAs refuses the
+ * conversion for Google Docs in both text/html and text/plain.
  * Plain text loses link targets whose anchor text differs from the
  * URL — but those are not standalone links anyway. A paragraph that
  * is just a URL (linked or not) exports as a line holding exactly
@@ -329,7 +332,18 @@ export const collectDocUrlsFromText_ = (text) => {
   return urls;
 };
 
-export const fetchDocumentText_ = (file) => file.getAs('text/plain').getDataAsString('UTF-8');
+export const fetchDocumentText_ = (file) => {
+  const res = UrlFetchApp.fetch(
+    `https://docs.google.com/document/d/${encodeURIComponent(file.getId())}/export?format=txt`,
+    {
+      headers: { Authorization: `Bearer ${ScriptApp.getOAuthToken()}` },
+      muteHttpExceptions: true,
+    },
+  );
+  const code = res.getResponseCode();
+  if (code < 200 || code >= 300) throw new Error(`Doc export returned ${code} for doc ${file.getId()}`);
+  return res.getContentText();
+};
 
 export const warmFolderIds_ = () => {
   const raw = PropertiesService.getScriptProperties().getProperty('WARM_FOLDER_IDS') || '';
