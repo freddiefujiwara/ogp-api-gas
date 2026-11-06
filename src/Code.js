@@ -312,10 +312,24 @@ export const setupWarmTrigger = () => {
 };
 
 /** -----------------------------
- *  Web API: GET ?url=<url>
+ *  Web API: GET ?url=<url>  or  GET ?urls=<url>|<url>|...
  *  ----------------------------- */
 export const doGet = (e) => {
-  const url = String(((e && e.parameter) || {}).url || '').trim();
+  const params = (e && e.parameter) || {};
+  if (params.urls) {
+    const urls = [...new Set(String(params.urls).split('|').map((u) => u.trim()).filter((u) => /^https?:\/\//.test(u)))].slice(0, OG_POST_MAX_URLS);
+    if (!urls.length) return jsonError_('urls parameter is required');
+    const data = resolveOgData_(urls);
+    const results = {};
+    Object.keys(data).forEach((url) => {
+      const d = data[url];
+      if (d && (d.title || d.image)) {
+        results[url] = { title: d.title || '', image: d.image || '', description: d.description || '' };
+      }
+    });
+    return json_({ results });
+  }
+  const url = String(params.url || '').trim();
   if (!/^https?:\/\//.test(url)) return jsonError_('url parameter is required');
   const data = resolveOgData_([url])[url] || {};
   return json_({ url, title: data.title || '', image: data.image || '', description: data.description || '' });

@@ -259,6 +259,23 @@ describe('ogp-api-gas Code.js', () => {
       const out = Code.doGet({ parameter: { url: URL_A } });
       expect(JSON.parse(out.text)).toEqual({ url: URL_A, title: '', image: '', description: '' });
     });
+
+    it('answers a pipe-separated urls batch in one call', () => {
+      const URL_B = 'https://example.com/page-b';
+      mockCache.getAll.mockReturnValue({
+        [Code.ogCacheKey_(URL_A)]: JSON.stringify({ title: 'Cached A', image: '', description: '' }),
+      });
+      mockUrlFetchApp.fetchAll.mockReturnValue([responseOf({ code: 404, blob: blobOf({}) })]);
+      const out = Code.doGet({ parameter: { urls: `${URL_A}|${URL_B}|not-a-url` } });
+      const parsed = JSON.parse(out.text);
+      expect(parsed.results[URL_A]).toEqual({ title: 'Cached A', image: '', description: '' });
+      expect(parsed.results[URL_B]).toBeUndefined();
+    });
+
+    it('rejects an empty urls batch', () => {
+      const out = Code.doGet({ parameter: { urls: 'not-a-url' } });
+      expect(JSON.parse(out.text)).toEqual({ error: 'urls parameter is required' });
+    });
   });
 
   describe('doPost', () => {
