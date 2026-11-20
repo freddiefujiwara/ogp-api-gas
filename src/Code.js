@@ -66,17 +66,30 @@ export const decodeHtmlEntities_ = (s) => String(s || '').replace(/&(#x?[0-9a-fA
     const code = (body[1] === 'x' || body[1] === 'X')
       ? parseInt(body.slice(2), 16)
       : parseInt(body.slice(1), 10);
-    return Number.isNaN(code) ? whole : String.fromCodePoint(code);
+    if (Number.isNaN(code)) return whole;
+    // References with no character of their own (NUL, surrogates, and
+    // anything past U+10FFFF) decode to U+FFFD, as in browsers;
+    // String.fromCodePoint would throw a RangeError for the last
+    // group and take the whole page's extraction down with it.
+    if (code === 0 || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF)) return '\uFFFD';
+    return String.fromCodePoint(code);
   }
   const named = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
   return Object.prototype.hasOwnProperty.call(named, body) ? named[body] : whole;
 });
 
 const metaContent_ = (tag, attrName) => {
-  const re = new RegExp(`${attrName}\\s*=\\s*"([^"]*)"|${attrName}\\s*=\\s*'([^']*)'`, 'i');
+  const re = new RegExp(`${attrName}\\s*=\\s*"([^"]*)"|${attrName}\\s*=\\s*'([^']*)'|${attrName}\\s*=\\s*([^\\s>]+)`, 'i');
   const m = String(tag).match(re);
   if (!m) return null;
-  return m[1] !== undefined ? m[1] : m[2];
+  return m[1] !== undefined ? m[1] : (m[2] !== undefined ? m[2] : m[3]);
+};
+
+// Truncate without splitting a surrogate pair: a dangling high
+// surrogate at the cut is dropped whole rather than emitted.
+export const truncatePairSafe_ = (s, limit) => {
+  const cut = String(s || '').slice(0, limit);
+  return /[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut;
 };
 
 export const resolveUrl_ = (maybeRelative, pageUrl) => {
@@ -93,7 +106,10 @@ export const resolveUrl_ = (maybeRelative, pageUrl) => {
 export const parseOgData_ = (html, pageUrl) => {
   const head = String(html || '').slice(0, OG_SCAN_LIMIT).split(/<\/head>/i)[0];
   const metas = {};
-  const tagRe = /<meta\s+[^>]*>/gi;
+  // Quoted attribute values may themselves contain '>', so the tag
+  // scan consumes quoted sections whole instead of ending at the
+  // first '>' it sees.
+  const tagRe = /<meta\s+(?:[^>"']|"[^"]*"|'[^']*')*>/gi;
   let tagMatch;
   while ((tagMatch = tagRe.exec(head)) !== null) {
     const tag = tagMatch[0];
@@ -107,7 +123,7 @@ export const parseOgData_ = (html, pageUrl) => {
     if (titleMatch) title = decodeHtmlEntities_(titleMatch[1].replace(/\s+/g, ' ').trim());
   }
   const image = resolveUrl_(metas['og:image'] || metas['twitter:image'] || '', pageUrl);
-  const description = (metas['og:description'] || metas.description || '').slice(0, OG_DESCRIPTION_LIMIT);
+  const description = truncatePairSafe_(metas['og:description'] || metas.description || '', OG_DESCRIPTION_LIMIT);
   return { title, image, description };
 };
 
@@ -156,6 +172,24 @@ export const decodeBody_ = (blob, headerCharset) => {
  *  List of stuff data source: the user's own possessions list,
  *  served as JSON by list-of-stuff-gas (LIST_DATA_URL property).
  *  ----------------------------- */
+// Boundary coercion for values that arrive from outside this app
+// (the list feed's JSON, POST bodies): scalars read as they did
+// through String()/Number(), anything else reads as empty / NaN.
+// A bare String() throws on values whose toString is not a function
+// (producible from JSON), and a bare Number() invents values from
+// booleans and arrays (true -> 1, [500] -> 500).
+export const outsideText_ = (v) => {
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  return '';
+};
+
+export const outsideNumber_ = (v) => {
+  if (typeof v === 'number') return v;
+  if (typeof v === 'string' && v.trim()) return Number(v);
+  return NaN;
+};
+
 export const listDataDescription_ = (item) => {
   // Price plus the title's property remainder (model number, size,
   // compatibility...), as prepared by list-of-stuff-gas's splitTitle.
@@ -163,17 +197,17 @@ export const listDataDescription_ = (item) => {
   // prints it as text below the card, and a card description is the
   // wrong place for it.
   const parts = [];
-  const price = Number(item && item.price);
+  const price = outsideNumber_(item && item.price);
   if (price > 0) {
     let head = `¥${price.toLocaleString('ja-JP')}`;
-    const unit = Number(item && item.unit);
+    const unit = outsideNumber_(item && item.unit);
     if (unit > 1) head += ` ×${unit}`;
     parts.push(head);
   }
-  const props = String((item && item.props) || '').trim();
+  const props = outsideText_(item && item.props).trim();
   if (props) {
     parts.push(
-      props.length > LIST_PROPS_LIMIT ? `${props.slice(0, LIST_PROPS_LIMIT)}…` : props
+      props.length > LIST_PROPS_LIMIT ? `${truncatePairSafe_(props, LIST_PROPS_LIMIT)}…` : props
     );
   }
   return parts.join(' ');
@@ -194,9 +228,12 @@ export const fetchListDataMap_ = () => {
   const map = {};
   (Array.isArray(items) ? items : []).forEach((item) => {
     if (!item || !item.url || !item.title) return;
-    map[String(item.url)] = {
-      title: String(item.shortTitle || item.title || ''),
-      image: String(item.image || '') || LIST_FALLBACK_IMAGE,
+    const url = outsideText_(item.url);
+    const title = outsideText_(item.title);
+    if (!url || !title) return;
+    map[url] = {
+      title: outsideText_(item.shortTitle || item.title),
+      image: outsideText_(item.image || '') || LIST_FALLBACK_IMAGE,
       description: listDataDescription_(item),
     };
   });
@@ -414,7 +451,7 @@ export const setupWarmTrigger = () => {
 export const doGet = (e) => {
   const params = (e && e.parameter) || {};
   if (params.urls) {
-    const urls = [...new Set(String(params.urls).split('|').map((u) => u.trim()).filter((u) => /^https?:\/\//.test(u)))].slice(0, OG_POST_MAX_URLS);
+    const urls = [...new Set(String(params.urls).split('|').map((u) => u.trim()).filter((u) => /^https?:\/\//i.test(u)))].slice(0, OG_POST_MAX_URLS);
     if (!urls.length) return jsonError_('urls parameter is required');
     const data = resolveOgData_(urls);
     const results = {};
@@ -427,7 +464,7 @@ export const doGet = (e) => {
     return json_({ results });
   }
   const url = String(params.url || '').trim();
-  if (!/^https?:\/\//.test(url)) return jsonError_('url parameter is required');
+  if (!/^https?:\/\//i.test(url)) return jsonError_('url parameter is required');
   const data = resolveOgData_([url])[url] || {};
   return json_({ url, title: data.title || '', image: data.image || '', description: data.description || '' });
 };
@@ -443,8 +480,8 @@ export const doPost = (e) => {
   try {
     const body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
     const urls = (Array.isArray(body.urls) ? body.urls : [])
-      .map((u) => String(u || '').trim())
-      .filter((u) => /^https?:\/\//.test(u));
+      .map((u) => outsideText_(u).trim())
+      .filter((u) => /^https?:\/\//i.test(u));
     if (!urls.length) return jsonError_('urls array is required');
     const data = resolveOgData_([...new Set(urls)].slice(0, OG_POST_MAX_URLS));
     const results = {};
